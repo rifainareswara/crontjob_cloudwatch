@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Monthly CloudWatch Logs cleanup'
+
+Resources:
+  LogCleanupFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          from datetime import datetime, timedelta
+
+          def handler(event, context):
+              client = boto3.client('logs')
+              
+              # Keep last 7 days of logs
+              retention_days = 7
+              deletion_cutoff = datetime.now() - timedelta(days=retention_days)
+              
+              log_groups = client.describe_log_groups()
+              
+              for group in log_groups['logGroups']:
+                  try:
+                      streams = client.describe_log_streams(
+                          logGroupName=group['logGroupName'],
+                          orderBy='LastEventTime',
+                          descending=True
+                      )
+                      
+                      for stream in streams['logStreams']:
+                          if 'lastEventTimestamp' in stream:
+                              last_event = datetime.fromtimestamp(stream['lastEventTimestamp']/1000)
+                              if last_event < deletion_cutoff:
+                                  client.delete_log_stream(
+                                      logGroupName=group['logGroupName'],
+                                      logStreamName=stream['logStreamName']
+                                  )
+                                  print(f"Deleted stream {stream['logStreamName']}")
+                                  
+                  except Exception as e:
+                      print(f"Error processing {group['logGroupName']}: {str(e)}")
+              
+              return {
+                  'statusCode': 200,
+                  'body': 'Log cleanup completed'
+              }
+      Runtime: python3.9
+      Timeout: 300
+      MemorySize: 128
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: LogCleanupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:DeleteLogStream'
+                  - 'logs:DescribeLogGroups'
+                  - 'logs:DescribeLogStreams'
+                Resource: '*'
+
+  LogCleanupRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      ScheduleExpression: 'cron(0 0 1 * ? *)'  # Run at midnight on the 1st of every month
+      State: 'ENABLED'
+      Targets:
+        - Arn: !GetAtt LogCleanupFunction.Arn
+          Id: 'LogCleanupTarget'
